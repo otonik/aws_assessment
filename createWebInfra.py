@@ -47,15 +47,15 @@ class CreateWebInfra:
                 print("deleting security group:%s" % r["GroupId"])
                 self.ec2_client.delete_security_group(GroupId=r["GroupId"])
 
-            response = self.ec2_client.describe_key_pairs(Filters=custom_filter)
-            for r in response["KeyPairs"]:
-                self.ec2_client.delete_key_pair(KeyPairId=r["KeyPairId"])
+            # response = self.ec2_client.describe_key_pairs(Filters=custom_filter)
+            # for r in response["KeyPairs"]:
+            #     self.ec2_client.delete_key_pair(KeyPairId=r["KeyPairId"])
 
         except ClientError as e:
             print(e)
 
     def create_key_pair(self):
-
+        # creating keypair for debugging purposes
         self.TAG_SPEC[0]["ResourceType"] = "key-pair"
         response = self.ec2_resource.create_key_pair(
             KeyName="ec2-keypair", TagSpecifications=self.TAG_SPEC
@@ -69,59 +69,64 @@ class CreateWebInfra:
 
     def create_web_app_ec2(self, security_group_id: str):
 
-        self.TAG_SPEC[0]["ResourceType"] = "instance"
-        # read user data script
         print("creating backend instances...")
-        with open("./files/node_deploy.sh", "r") as userdata:
-            instance = self.ec2_resource.create_instances(
-                ImageId=self.AMI_ID,
-                InstanceType=self.INSTANCE_TYPE,
-                MinCount=1,
-                MaxCount=2,
-                KeyName="ec2-keypair",
-                SecurityGroupIds=[security_group_id],
-                TagSpecifications=self.TAG_SPEC,
-                UserData=userdata.read(),
-            )
-        print("created instances %s" % instance)
-
-        return instance
-
-    def create_nginx_ec2(self, security_group_id: str, private_ips: list):
-
         self.TAG_SPEC[0]["ResourceType"] = "instance"
-        try:
-                
-            backend_servers = {}
-            for i, val in enumerate(private_ips):
-                backend_servers["backend_server" + str(i)] = val
 
-            # TODO: make template more dynamic
+        # read user data script
+        try:
+            with open("./files/node_deploy.sh", "r") as userdata:
+                instance = self.ec2_resource.create_instances(
+                    ImageId=self.AMI_ID,
+                    InstanceType=self.INSTANCE_TYPE,
+                    MinCount=1,
+                    MaxCount=2,
+                    # KeyName="ec2-keypair",
+                    SecurityGroupIds=[security_group_id],
+                    TagSpecifications=self.TAG_SPEC,
+                    UserData=userdata.read(),
+                )
+            print("created instances %s" % instance)
+            return instance
+
+        except Exception as e:
+            print(e)
+
+    def create_nginx_ec2(self, security_group_id: str, instances: list):
+
+        print("creating nginx instance...")
+        self.TAG_SPEC[0]["ResourceType"] = "instance"
+        private_ips = [instance.private_ip_address for instance in instances]
+        try:
+
+            backend_servers = {}
+            for i, ip in enumerate(private_ips):
+                key = "backend_server" + str(i)
+                backend_servers[key] = ip
+
+            # TODO: make template more dynamic (currently fixed to two entries)
             with open("./files/nginx_deploy.sh", "r") as userdata:
                 src = Template(userdata.read())
                 userdata_template = src.substitute(backend_servers)
-                print(userdata_template)
                 instance = self.ec2_resource.create_instances(
                     ImageId=self.AMI_ID,
                     InstanceType=self.INSTANCE_TYPE,
                     MinCount=1,
                     MaxCount=1,
-                    KeyName="ec2-keypair",
+                    # KeyName="ec2-keypair",
                     SecurityGroupIds=[security_group_id],
                     TagSpecifications=self.TAG_SPEC,
                     UserData=userdata_template,
                 )
-
+                print("created instances %s" % instance)
                 return instance
-        except Exception(e):
+        except Exception as e:
             print(e)
 
     def create_security_group(self):
 
         self.TAG_SPEC[0]["ResourceType"] = "security-group"
-
+        # FIXME: use a different security group for backend to deny port 80 inbound access
         try:
-
             print("creating new security group...")
             response = self.ec2_client.describe_vpcs()
             vpc_id = response.get("Vpcs", [{}])[0].get("VpcId", "")
@@ -144,12 +149,12 @@ class CreateWebInfra:
                         "ToPort": 80,
                         "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
                     },
-                    {
-                        "IpProtocol": "tcp",
-                        "FromPort": 22,
-                        "ToPort": 22,
-                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
-                    },
+                    # {
+                    #     "IpProtocol": "tcp",
+                    #     "FromPort": 22,
+                    #     "ToPort": 22,
+                    #     "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                    # },
                     {
                         "IpProtocol": "-1",
                         "FromPort": -1,
@@ -166,22 +171,35 @@ class CreateWebInfra:
 
     def deploy(self):
         try:
-            print("starting new infra...")
-            self.create_key_pair()
+            print("creating new infrastructure...")
+            # self.create_key_pair()
             sg_id = self.create_security_group()
             response = self.create_web_app_ec2(sg_id)
 
             instances = response
-            private_ips = [instance.private_ip_address for instance in instances]
-            map(lambda x: x.wait_until_exists(), instances)
+            instance_ids = [instance.id for instance in instances]
+            waiter = self.ec2_client.get_waiter("instance_running")
+            waiter.wait(InstanceIds=instance_ids)
 
-            response = self.create_nginx_ec2(sg_id, private_ips)
-            instances.extend(response[0])
+            response = self.create_nginx_ec2(sg_id, instances)
+            instances.append(response[0].id)
 
-            map(lambda x: x.wait_until_running(), instances)
-            print("waiting for all instances to run...")
+            print("waiting for instances to run...")
+            waiter.wait(InstanceIds=instance_ids)
 
-            # print(response)
+            # TODO: find a better way for orchestration
+            print("waiting for instances to initialize...")
+            waiter = self.ec2_client.get_waiter("instance_status_ok")
+            waiter.wait(InstanceIds=instance_ids)
+            waiter = self.ec2_client.get_waiter("system_status_ok")
+            waiter.wait(InstanceIds=instance_ids)
+
+            # refresh attributes
+            response[0].load()
+            print(
+                "Application created and available at: %s"
+                % ("http://" + response[0].public_dns_name)
+            )
 
         except Exception as e:
             print(e)

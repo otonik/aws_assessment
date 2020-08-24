@@ -4,6 +4,7 @@ yum update -y
 yum install -y epel-release
 amazon-linux-extras install -y nginx1.12
 
+# create nginx conf
 cat <<EOT >> nginx.conf
 #user  nobody;
 worker_processes  1;
@@ -26,8 +27,8 @@ http {
 
     upstream backend {
     ip_hash;
+    server $backend_server0:3000;
     server $backend_server1:3000;
-    server $backend_server2:3000;
 
     }
 
