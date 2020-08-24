@@ -206,7 +206,7 @@ class CreateWebInfra:
 
 
 if __name__ == "__main__":
-    # assumes existing VPC and IAM role with enough privileges
+    # assumes existing default VPC and IAM role with enough privileges
     if len(sys.argv) > 1 and sys.argv[1] == "--teardown":
         CreateWebInfra().tear_down_resources()
     else:
